@@ -36,11 +36,13 @@ train_transforms <- function(img) {
     # then move to the GPU (if available)
     (function(x) x$to(device = device)) %>%
     # data augmentation
-    transform_random_resized_crop(size = c(224, 224)) %>%
+    # transform_random_resized_crop(size = c(224, 224)) %>%
     # data augmentation
-    transform_color_jitter() %>%
+    # transform_color_jitter() %>%
     # data augmentation
-    transform_random_horizontal_flip() %>%
+    # transform_random_horizontal_flip() %>%
+    transform_resize(size = c(100, 100)) %>%
+    transform_center_crop(100) %>% 
     # normalize according to what is expected by resnet
     transform_normalize(mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
 }
@@ -48,9 +50,9 @@ train_transforms <- function(img) {
 valid_transforms <- function(img) {
   img %>%
     transform_to_tensor() %>%
+    transform_resize(size = c(100, 100)) %>%
+    transform_center_crop(100) %>% 
     (function(x) x$to(device = device)) %>%
-    transform_resize(256) %>%
-    transform_center_crop(224) %>% 
     transform_normalize(mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
 }
 
@@ -64,6 +66,8 @@ corn <- image_read("C:/Users/Conducta/Ivan data/Corn/train/broken/00000.png")
 corn %>%
   # # first convert image to tensor
   transform_to_tensor() %>%
+  # # then move to the GPU (if available)
+  # (function(x) x$to(device = device)) %>%
   # normalize according to what is expected by resnet (model)
   transform_normalize(mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
 ```
@@ -86,24 +90,59 @@ silkcut <- labels %>% filter(label == "silkcut") %>% pull(image) %>%
 # Edit files acording to torch
 ```{r eval=FALSE}
 library(fs)
+library(stringr)
+dir_create("C:/Users/Conducta/Ivan data/Corn/train/broken")
 dir_create("C:/Users/Conducta/Ivan data/Corn/train/broken")
 dir_create("C:/Users/Conducta/Ivan data/Corn/train/pure")
-dir_create("C:/Users/Conducta/Ivan data/Corn/train/discolored")
-dir_create("C:/Users/Conducta/Ivan data/Corn/train/silkcut")
+dir_create("C:/Users/Conducta/Ivan data/Corn/train/pure")
 
 file_move(broken, "C:/Users/Conducta/Ivan data/Corn/train/broken")
 file_move(pure, "C:/Users/Conducta/Ivan data/Corn/train/pure")
 file_move(discolored, "C:/Users/Conducta/Ivan data/Corn/train/discolored")
 file_move(silkcut, "C:/Users/Conducta/Ivan data/Corn/train/silkcut")
+
+# Create validation dataset
+dir_create("C:/Users/Conducta/Ivan data/Corn/valid/discolored")
+dir_create("C:/Users/Conducta/Ivan data/Corn/valid/discolored")
+dir_create("C:/Users/Conducta/Ivan data/Corn/valid/silkcut")
+dir_create("C:/Users/Conducta/Ivan data/Corn/valid/silkcut")
+
+n_broken <- length(broken)
+n_pure <- length(pure)
+n_discolored <- length(discolored)
+n_silkcut <- length(silkcut)
+
+perc_broken <- round(n_broken*5/100)
+perc_pure <- round(n_pure*5/100)
+perc_discolored <- round(n_discolored*5/100)
+perc_silkcut <- round(n_silkcut*5/100)
+
+valid_broken <- sample(broken, perc_broken) %>% str_sub(., start = -10) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/train/broken", .)
+valid_pure <- sample(pure, perc_pure) %>% str_sub(., start = -10) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/train/pure", .)
+valid_discolored <- sample(discolored, perc_discolored) %>% str_sub(., start = -10) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/train/discolored", .)
+valid_silkcut <- sample(silkcut, perc_silkcut) %>% str_sub(., start = -10) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/train/silkcut", .)
+
+
+file_move(valid_broken, "C:/Users/Conducta/Ivan data/Corn/valid/broken")
+file_move(valid_pure, "C:/Users/Conducta/Ivan data/Corn/valid/pure")
+file_move(valid_discolored, "C:/Users/Conducta/Ivan data/Corn/valid/discolored")
+file_move(valid_silkcut, "C:/Users/Conducta/Ivan data/Corn/valid/silkcut")
 ```
- 
+
 
 # Import data to torch
 ```{r}
-data_dir <- "C:/Users/Conducta/Ivan data/Corn/train"
 
 train_ds <- image_folder_dataset(
-  root = data_dir,
+  root = "C:/Users/Conducta/Ivan data/Corn/train",
+  transform = train_transforms)
+
+valid_ds <- image_folder_dataset(
+  root = "C:/Users/Conducta/Ivan data/Corn/valid",
   transform = train_transforms)
 
 batch_size <- 64
@@ -111,6 +150,7 @@ class_names <- train_ds$classes
 length(class_names)
 
 train_dl <- dataloader(train_ds, batch_size = batch_size, shuffle = TRUE)
+valid_dl <- dataloader(valid_ds, batch_size = batch_size, shuffle = FALSE)
 ```
 
 # Check some images
@@ -163,14 +203,14 @@ optimizer <- optim_sgd(model$parameters, lr = 0.1, momentum = 0.9)
 ```
 
 ## Optimal learning
-```{r eval=FALSE}
+```{r}
 # ported from: https://sgugger.github.io/how-do-you-find-a-good-learning-rate.html
 
 losses <- c()
 log_lrs <- c()
 
 find_lr <- function(init_value = 1e-8, final_value = 10, beta = 0.98) {
-
+  
   num <- train_dl$.length()
   mult = (final_value/init_value)^(1/num)
   lr <- init_value
@@ -178,14 +218,14 @@ find_lr <- function(init_value = 1e-8, final_value = 10, beta = 0.98) {
   avg_loss <- 0
   best_loss <- 0
   batch_num <- 0
-
+  
   coro::loop(for (b in train_dl) {
-
+    
     batch_num <- batch_num + 1
     optimizer$zero_grad()
     output <- model(b[[1]]$to(device = device))
     loss <- criterion(output, b[[2]]$to(device = device))
-
+    
     #Compute the smoothed loss
     avg_loss <- beta * avg_loss + (1-beta) * loss$item()
     smoothed_loss <- avg_loss / (1 - beta^batch_num)
@@ -193,14 +233,14 @@ find_lr <- function(init_value = 1e-8, final_value = 10, beta = 0.98) {
     if (batch_num > 1 && smoothed_loss > 4 * best_loss) break
     #Record the best loss
     if (smoothed_loss < best_loss || batch_num == 1) best_loss <- smoothed_loss
-
+    
     #Store the values
     losses <<- c(losses, smoothed_loss)
     log_lrs <<- c(log_lrs, (log(lr, 10)))
-
+    
     loss$backward()
     optimizer$step()
-
+    
     #Update the lr for the next step
     lr <- lr * mult
     optimizer$param_groups[[1]]$lr <- lr
@@ -216,7 +256,7 @@ ggplot(df, aes(log_lrs, losses)) + geom_point(size = 1) + theme_classic()
 
 # re-initialize the model
 ```{r}
-lr <-  0.05
+lr <-  0.08
 
 model <- model_resnet18(pretrained = TRUE)
 model$parameters %>% purrr::walk(function(param) param$requires_grad_(FALSE))
@@ -240,7 +280,7 @@ scheduler <- optimizer %>%
 # Strart training
 ```{r}
 train_batch <- function(b) {
-
+  
   optimizer$zero_grad()
   output <- model(b[[1]])
   loss <- criterion(output, b[[2]]$to(device = device))
@@ -248,34 +288,34 @@ train_batch <- function(b) {
   optimizer$step()
   scheduler$step()
   loss$item()
-
+  
 }
 
 valid_batch <- function(b) {
-
+  
   output <- model(b[[1]])
   loss <- criterion(output, b[[2]]$to(device = device))
   loss$item()
 }
 
 for (epoch in 1:num_epochs) {
-
+  
   model$train()
   train_losses <- c()
-
+  
   coro::loop(for (b in train_dl) {
     loss <- train_batch(b)
     train_losses <- c(train_losses, loss)
   })
-
+  
   model$eval()
   valid_losses <- c()
-
+  
   coro::loop(for (b in valid_dl) {
     loss <- valid_batch(b)
     valid_losses <- c(valid_losses, loss)
   })
-
+  
   cat(sprintf("\nLoss at epoch %d: training: %3f, validation: %3f\n", epoch, mean(train_losses), mean(valid_losses)))
 }
 ```
@@ -284,7 +324,7 @@ for (epoch in 1:num_epochs) {
 # Test on set accuracy
 ```{r}
 train_batch <- function(b) {
-
+  
   optimizer$zero_grad()
   output <- model(b[[1]])
   loss <- criterion(output, b[[2]]$to(device = device))
@@ -292,39 +332,39 @@ train_batch <- function(b) {
   optimizer$step()
   scheduler$step()
   loss$item()
-
+  
 }
 
 valid_batch <- function(b) {
-
+  
   output <- model(b[[1]])
   loss <- criterion(output, b[[2]]$to(device = device))
   loss$item()
 }
 
 for (epoch in 1:num_epochs) {
-
+  
   model$train()
   train_losses <- c()
-
+  
   coro::loop(for (b in train_dl) {
     loss <- train_batch(b)
     train_losses <- c(train_losses, loss)
   })
-
+  
   model$eval()
   valid_losses <- c()
-
+  
   coro::loop(for (b in valid_dl) {
     loss <- valid_batch(b)
     valid_losses <- c(valid_losses, loss)
   })
-
+  
   cat(sprintf("\nLoss at epoch %d: training: %3f, validation: %3f\n", epoch, mean(train_losses), mean(valid_losses)))
 }
 ```
 
-# Results
+# Resukts
 ```{r}
 test_accuracy <-  correct/total
 test_accuracy
