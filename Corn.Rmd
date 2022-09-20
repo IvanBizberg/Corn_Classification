@@ -145,12 +145,19 @@ valid_ds <- image_folder_dataset(
   root = "C:/Users/Conducta/Ivan data/Corn/valid",
   transform = train_transforms)
 
+test_ds <- image_folder_dataset(
+  root = "C:/Users/Conducta/Ivan data/Corn/test",
+  transform = train_transforms)
+
+
 batch_size <- 64
 class_names <- train_ds$classes
 length(class_names)
 
 train_dl <- dataloader(train_ds, batch_size = batch_size, shuffle = TRUE)
 valid_dl <- dataloader(valid_ds, batch_size = batch_size, shuffle = FALSE)
+test_dl <- dataloader(test_ds, batch_size = batch_size, shuffle = FALSE)
+
 ```
 
 # Check some images
@@ -323,45 +330,33 @@ for (epoch in 1:num_epochs) {
 
 # Test on set accuracy
 ```{r}
-train_batch <- function(b) {
-  
-  optimizer$zero_grad()
+model$eval()
+
+test_batch <- function(b) {
+
   output <- model(b[[1]])
-  loss <- criterion(output, b[[2]]$to(device = device))
-  loss$backward()
-  optimizer$step()
-  scheduler$step()
-  loss$item()
+  labels <- b[[2]]$to(device = device)
+  loss <- criterion(output, labels)
   
+  test_losses <<- c(test_losses, loss$item())
+  # torch_max returns a list, with position 1 containing the values
+  # and position 2 containing the respective indices
+  predicted <- torch_max(output$data(), dim = 2)[[2]]
+  total <<- total + labels$size(1)
+  # add number of correct classifications in this batch to the aggregate
+  correct <<- correct + (predicted == labels)$sum()$item()
+
 }
 
-valid_batch <- function(b) {
-  
-  output <- model(b[[1]])
-  loss <- criterion(output, b[[2]]$to(device = device))
-  loss$item()
+test_losses <- c()
+total <- 0
+correct <- 0
+
+for (b in enumerate(test_dl)) {
+  test_batch(b)
 }
 
-for (epoch in 1:num_epochs) {
-  
-  model$train()
-  train_losses <- c()
-  
-  coro::loop(for (b in train_dl) {
-    loss <- train_batch(b)
-    train_losses <- c(train_losses, loss)
-  })
-  
-  model$eval()
-  valid_losses <- c()
-  
-  coro::loop(for (b in valid_dl) {
-    loss <- valid_batch(b)
-    valid_losses <- c(valid_losses, loss)
-  })
-  
-  cat(sprintf("\nLoss at epoch %d: training: %3f, validation: %3f\n", epoch, mean(train_losses), mean(valid_losses)))
-}
+mean(test_losses)
 ```
 
 # Resukts
