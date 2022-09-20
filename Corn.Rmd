@@ -359,7 +359,7 @@ for (b in enumerate(test_dl)) {
 mean(test_losses)
 ```
 
-# Resukts
+# Results
 ```{r}
 test_accuracy <-  correct/total
 test_accuracy
