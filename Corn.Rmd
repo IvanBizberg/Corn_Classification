@@ -10,6 +10,323 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # Libraries
-# Import data
-# transform data
+
+```{r}
+library(torch)
+library(torchvision)
+library(torchdatasets)
+
+library(dplyr)
+library(pins)
+library(ggplot2)
+```
+
+# setup device
+```{r}
+
+device <- if (cuda_is_available()) torch_device("cuda:0") else "cpu"
+```
+
+# Create functions
+```{r}
+train_transforms <- function(img) {
+  img %>%
+    # first convert image to tensor
+    transform_to_tensor() %>%
+    # then move to the GPU (if available)
+    (function(x) x$to(device = device)) %>%
+    # data augmentation
+    transform_random_resized_crop(size = c(224, 224)) %>%
+    # data augmentation
+    transform_color_jitter() %>%
+    # data augmentation
+    transform_random_horizontal_flip() %>%
+    # normalize according to what is expected by resnet
+    transform_normalize(mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
+}
+
+valid_transforms <- function(img) {
+  img %>%
+    transform_to_tensor() %>%
+    (function(x) x$to(device = device)) %>%
+    transform_resize(256) %>%
+    transform_center_crop(224) %>% 
+    transform_normalize(mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
+}
+
+test_transforms <- valid_transforms
+```
+# Test function 
+```{r}
+library(magick)
+corn <- image_read("C:/Users/Conducta/Ivan data/Corn/train/broken/00000.png")
+
+corn %>%
+  # # first convert image to tensor
+  transform_to_tensor() %>%
+  # normalize according to what is expected by resnet (model)
+  transform_normalize(mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
+```
+
+
+# separate train data into classes
+```{r}
+labels <- read.csv("C:/Users/Conducta/Ivan data/Corn/train.csv")
+
+broken <- labels %>% filter(label == "broken") %>% pull(image) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/", .)
+pure <- labels %>% filter(label == "pure") %>% pull(image) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/", .)
+discolored <- labels %>% filter(label == "discolored") %>% pull(image) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/", .)
+silkcut <- labels %>% filter(label == "silkcut") %>% pull(image) %>% 
+  paste0("C:/Users/Conducta/Ivan data/Corn/", .)
+```
+
+# Edit files acording to torch
+```{r eval=FALSE}
+library(fs)
+dir_create("C:/Users/Conducta/Ivan data/Corn/train/broken")
+dir_create("C:/Users/Conducta/Ivan data/Corn/train/pure")
+dir_create("C:/Users/Conducta/Ivan data/Corn/train/discolored")
+dir_create("C:/Users/Conducta/Ivan data/Corn/train/silkcut")
+
+file_move(broken, "C:/Users/Conducta/Ivan data/Corn/train/broken")
+file_move(pure, "C:/Users/Conducta/Ivan data/Corn/train/pure")
+file_move(discolored, "C:/Users/Conducta/Ivan data/Corn/train/discolored")
+file_move(silkcut, "C:/Users/Conducta/Ivan data/Corn/train/silkcut")
+```
+ 
+
+# Import data to torch
+```{r}
+data_dir <- "C:/Users/Conducta/Ivan data/Corn/train"
+
+train_ds <- image_folder_dataset(
+  root = data_dir,
+  transform = train_transforms)
+
+batch_size <- 64
+class_names <- train_ds$classes
+length(class_names)
+
+train_dl <- dataloader(train_ds, batch_size = batch_size, shuffle = TRUE)
+```
+
+# Check some images
+```{r}
+batch <- train_dl$.iter()$.next()
+batch[[1]]$size()
+batch[[2]]$size()
+classes <- batch[[2]]; classes
+
+
+images <- as_array(batch[[1]]) %>% aperm(perm = c(1, 3, 4, 2))
+mean <- c(0.485, 0.456, 0.406)
+std <- c(0.229, 0.224, 0.225)
+images <- std * images + mean
+images <- images * 255
+images[images > 255] <- 255
+images[images < 0] <- 0
+
+par(mfcol = c(4,6), mar = rep(1, 4))
+
+images %>%
+  purrr::array_tree(1) %>%
+  purrr::set_names(class_names[as_array(classes)]) %>%
+  purrr::map(as.raster, max = 255) %>%
+  purrr::iwalk(~{plot(.x); title(.y)})
+```
+
+
+
+
+
 # torch models
+```{r}
+model <- model_resnet18(pretrained = TRUE)
+model$parameters %>% purrr::walk(function(param) param$requires_grad_(FALSE))
+num_features <- model$fc$in_features
+
+model$fc <- nn_linear(in_features = num_features, out_features = length(class_names))
+```
+# Put in gpu if available
+```{r}
+model <- model$to(device = device)
+```
+
+# Training
+```{r}
+criterion <- nn_cross_entropy_loss()
+
+optimizer <- optim_sgd(model$parameters, lr = 0.1, momentum = 0.9)
+```
+
+## Optimal learning
+```{r eval=FALSE}
+# ported from: https://sgugger.github.io/how-do-you-find-a-good-learning-rate.html
+
+losses <- c()
+log_lrs <- c()
+
+find_lr <- function(init_value = 1e-8, final_value = 10, beta = 0.98) {
+
+  num <- train_dl$.length()
+  mult = (final_value/init_value)^(1/num)
+  lr <- init_value
+  optimizer$param_groups[[1]]$lr <- lr
+  avg_loss <- 0
+  best_loss <- 0
+  batch_num <- 0
+
+  coro::loop(for (b in train_dl) {
+
+    batch_num <- batch_num + 1
+    optimizer$zero_grad()
+    output <- model(b[[1]]$to(device = device))
+    loss <- criterion(output, b[[2]]$to(device = device))
+
+    #Compute the smoothed loss
+    avg_loss <- beta * avg_loss + (1-beta) * loss$item()
+    smoothed_loss <- avg_loss / (1 - beta^batch_num)
+    #Stop if the loss is exploding
+    if (batch_num > 1 && smoothed_loss > 4 * best_loss) break
+    #Record the best loss
+    if (smoothed_loss < best_loss || batch_num == 1) best_loss <- smoothed_loss
+
+    #Store the values
+    losses <<- c(losses, smoothed_loss)
+    log_lrs <<- c(log_lrs, (log(lr, 10)))
+
+    loss$backward()
+    optimizer$step()
+
+    #Update the lr for the next step
+    lr <- lr * mult
+    optimizer$param_groups[[1]]$lr <- lr
+  })
+}
+
+find_lr()
+
+df <- data.frame(log_lrs = log_lrs, losses = losses)
+ggplot(df, aes(log_lrs, losses)) + geom_point(size = 1) + theme_classic()
+```
+
+
+# re-initialize the model
+```{r}
+lr <-  0.05
+
+model <- model_resnet18(pretrained = TRUE)
+model$parameters %>% purrr::walk(function(param) param$requires_grad_(FALSE))
+
+num_features <- model$fc$in_features
+
+model$fc <- nn_linear(in_features = num_features, out_features = length(class_names))
+
+model <- model$to(device = device)
+
+criterion <- nn_cross_entropy_loss()
+
+optimizer <- optim_sgd(model$parameters, lr = lr, momentum = 0.9)
+
+num_epochs = 10
+
+scheduler <- optimizer %>% 
+  lr_one_cycle(max_lr = lr, epochs = num_epochs, steps_per_epoch = train_dl$.length())
+```
+
+# Strart training
+```{r}
+train_batch <- function(b) {
+
+  optimizer$zero_grad()
+  output <- model(b[[1]])
+  loss <- criterion(output, b[[2]]$to(device = device))
+  loss$backward()
+  optimizer$step()
+  scheduler$step()
+  loss$item()
+
+}
+
+valid_batch <- function(b) {
+
+  output <- model(b[[1]])
+  loss <- criterion(output, b[[2]]$to(device = device))
+  loss$item()
+}
+
+for (epoch in 1:num_epochs) {
+
+  model$train()
+  train_losses <- c()
+
+  coro::loop(for (b in train_dl) {
+    loss <- train_batch(b)
+    train_losses <- c(train_losses, loss)
+  })
+
+  model$eval()
+  valid_losses <- c()
+
+  coro::loop(for (b in valid_dl) {
+    loss <- valid_batch(b)
+    valid_losses <- c(valid_losses, loss)
+  })
+
+  cat(sprintf("\nLoss at epoch %d: training: %3f, validation: %3f\n", epoch, mean(train_losses), mean(valid_losses)))
+}
+```
+
+
+# Test on set accuracy
+```{r}
+train_batch <- function(b) {
+
+  optimizer$zero_grad()
+  output <- model(b[[1]])
+  loss <- criterion(output, b[[2]]$to(device = device))
+  loss$backward()
+  optimizer$step()
+  scheduler$step()
+  loss$item()
+
+}
+
+valid_batch <- function(b) {
+
+  output <- model(b[[1]])
+  loss <- criterion(output, b[[2]]$to(device = device))
+  loss$item()
+}
+
+for (epoch in 1:num_epochs) {
+
+  model$train()
+  train_losses <- c()
+
+  coro::loop(for (b in train_dl) {
+    loss <- train_batch(b)
+    train_losses <- c(train_losses, loss)
+  })
+
+  model$eval()
+  valid_losses <- c()
+
+  coro::loop(for (b in valid_dl) {
+    loss <- valid_batch(b)
+    valid_losses <- c(valid_losses, loss)
+  })
+
+  cat(sprintf("\nLoss at epoch %d: training: %3f, validation: %3f\n", epoch, mean(train_losses), mean(valid_losses)))
+}
+```
+
+# Results
+```{r}
+test_accuracy <-  correct/total
+test_accuracy
+```
+
